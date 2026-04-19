@@ -1,14 +1,22 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -316,12 +324,125 @@ func jsonResp(w http.ResponseWriter, status int, resp APIResponse) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+func getOrCreateCredentials() (username, passwordHash string) {
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "."
+	}
+	configPath := filepath.Join(filepath.Dir(exe), ".credentials")
+
+	if data, err := os.ReadFile(configPath); err == nil {
+		parts := strings.SplitN(strings.TrimSpace(string(data)), ":", 2)
+		if len(parts) == 2 {
+			return parts[0], parts[1]
+		}
+	}
+
+	// Generate random password
+	b := make([]byte, 12)
+	rand.Read(b)
+	password := hex.EncodeToString(b)[:12]
+	username = "admin"
+	hash := sha256.Sum256([]byte(password))
+	passwordHash = hex.EncodeToString(hash[:])
+
+	os.WriteFile(configPath, []byte(username+":"+passwordHash), 0600)
+	log.Printf("========================================")
+	log.Printf("  Generated credentials:")
+	log.Printf("  Username: %s", username)
+	log.Printf("  Password: %s", password)
+	log.Printf("  (Saved to %s)", configPath)
+	log.Printf("========================================")
+	return username, passwordHash
+}
+
+func basicAuthMiddleware(expectedUser, expectedPassHash string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Login API endpoint
+		if r.URL.Path == "/api/login" && r.Method == http.MethodPost {
+			var creds struct {
+				Username string `json:"username"`
+				Password string `json:"password"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&creds); err != nil {
+				jsonResp(w, 400, APIResponse{Error: "invalid request"})
+				return
+			}
+			hash := sha256.Sum256([]byte(creds.Password))
+			passHash := hex.EncodeToString(hash[:])
+			if subtle.ConstantTimeCompare([]byte(creds.Username), []byte(expectedUser)) == 1 &&
+				subtle.ConstantTimeCompare([]byte(passHash), []byte(expectedPassHash)) == 1 {
+				// Set auth cookie
+				http.SetCookie(w, &http.Cookie{
+					Name:     "cm_auth",
+					Value:    expectedPassHash[:16],
+					Path:     "/",
+					HttpOnly: true,
+					MaxAge:   86400 * 7,
+				})
+				jsonResp(w, 200, APIResponse{Success: true})
+			} else {
+				jsonResp(w, 401, APIResponse{Error: "用户名或密码错误"})
+			}
+			return
+		}
+
+		// Check auth cookie
+		cookie, err := r.Cookie("cm_auth")
+		if err == nil && cookie.Value == expectedPassHash[:16] {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// For API requests, return 401
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/ws/") {
+			jsonResp(w, 401, APIResponse{Error: "unauthorized"})
+			return
+		}
+
+		// For page requests, serve the page (login overlay handled by frontend)
+		next.ServeHTTP(w, r)
+	})
+}
+
+func getOrCreatePort() string {
+	// Check environment variable first
+	if p := os.Getenv("PORT"); p != "" {
+		return p
+	}
+
+	// Determine config file path next to the executable
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "."
+	}
+	configPath := filepath.Join(filepath.Dir(exe), ".port")
+
+	// Try to read saved port
+	if data, err := os.ReadFile(configPath); err == nil {
+		port := string(data)
+		if _, err := strconv.Atoi(port); err == nil {
+			return port
+		}
+	}
+
+	// Pick a random available port
+	listener, err := net.Listen("tcp", ":0")
+	if err != nil {
+		log.Fatal("failed to find available port:", err)
+	}
+	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+	listener.Close()
+
+	// Save for future runs
+	os.WriteFile(configPath, []byte(port), 0644)
+	return port
+}
+
 func main() {
 	mgr := NewConsoleManager()
-	addr := ":8080"
-	if p := os.Getenv("PORT"); p != "" {
-		addr = ":" + p
-	}
+	addr := ":" + getOrCreatePort()
+	authUser, authPassHash := getOrCreateCredentials()
 
 	mux := http.NewServeMux()
 
@@ -487,7 +608,8 @@ func main() {
 	mux.Handle("/", http.FileServer(http.FS(staticFS)))
 
 	log.Printf("Console Manager starting on %s", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	handler := basicAuthMiddleware(authUser, authPassHash, mux)
+	if err := http.ListenAndServe(addr, handler); err != nil {
 		log.Fatal(err)
 	}
 }
