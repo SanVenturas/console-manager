@@ -1,0 +1,1042 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Console Manager</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg-base: #0a0a0f;
+  --bg-surface: #12121a;
+  --bg-elevated: #1a1a26;
+  --bg-hover: #22222f;
+  --border: rgba(255,255,255,0.06);
+  --border-active: rgba(99,179,237,0.4);
+  --text-primary: #e8eaf0;
+  --text-secondary: #8b8fa3;
+  --text-muted: #555770;
+  --accent: #63b3ed;
+  --accent-soft: rgba(99,179,237,0.12);
+  --green: #68d391;
+  --green-soft: rgba(104,211,145,0.12);
+  --red: #fc8181;
+  --red-soft: rgba(252,129,129,0.12);
+  --orange: #f6ad55;
+  --orange-soft: rgba(246,173,85,0.12);
+  --radius: 10px;
+  --radius-lg: 14px;
+  --transition: 150ms ease;
+  --shadow: 0 4px 24px rgba(0,0,0,0.4);
+  --sidebar-width: 280px;
+}
+
+html, body { height: 100%; overflow: hidden; }
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  background: var(--bg-base);
+  color: var(--text-primary);
+  display: flex;
+  flex-direction: column;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.14); }
+
+/* ── Header ── */
+.header {
+  height: 52px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 20px;
+  flex-shrink: 0;
+  z-index: 10;
+}
+
+.header-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.header-logo {
+  width: 28px; height: 28px;
+  background: linear-gradient(135deg, var(--accent), #a78bfa);
+  border-radius: 8px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px;
+}
+
+.header-title {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.3px;
+}
+
+.header-title span { color: var(--accent); }
+
+.header-meta {
+  font-size: 11px;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.header-meta .dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* ── Layout ── */
+.layout {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ── Sidebar ── */
+.sidebar {
+  width: var(--sidebar-width);
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
+
+.sidebar-top {
+  padding: 14px 14px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.sidebar-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.sidebar-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--text-muted);
+}
+
+.btn-new {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid rgba(99,179,237,0.2);
+  border-radius: 7px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  transition: all var(--transition);
+}
+
+.btn-new:hover {
+  background: rgba(99,179,237,0.2);
+  border-color: rgba(99,179,237,0.35);
+}
+
+.btn-new svg { width: 14px; height: 14px; }
+
+.search-box {
+  position: relative;
+}
+
+.search-box input {
+  width: 100%;
+  padding: 7px 10px 7px 32px;
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+  transition: border var(--transition);
+}
+
+.search-box input::placeholder { color: var(--text-muted); }
+.search-box input:focus { border-color: var(--border-active); }
+
+.search-box svg {
+  position: absolute;
+  left: 9px; top: 50%;
+  transform: translateY(-50%);
+  width: 14px; height: 14px;
+  color: var(--text-muted);
+}
+
+.console-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.console-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  margin-bottom: 2px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all var(--transition);
+  border: 1px solid transparent;
+  position: relative;
+}
+
+.console-item:hover { background: var(--bg-hover); }
+
+.console-item.active {
+  background: var(--accent-soft);
+  border-color: rgba(99,179,237,0.15);
+}
+
+.console-item .status-indicator {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.console-item .status-indicator.running {
+  background: var(--green);
+  box-shadow: 0 0 8px rgba(104,211,145,0.5);
+}
+
+.console-item .status-indicator.stopped { background: var(--text-muted); }
+.console-item .status-indicator.exited { background: var(--orange); }
+
+.console-item .item-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.console-item .item-name {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.console-item .item-cmd {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-family: 'JetBrains Mono', monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 1px;
+}
+
+.console-item .item-badge {
+  font-size: 10px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+.console-item .item-badge.running {
+  background: var(--green-soft);
+  color: var(--green);
+}
+
+.console-item .item-badge.stopped {
+  background: rgba(255,255,255,0.04);
+  color: var(--text-muted);
+}
+
+.console-item .item-badge.exited {
+  background: var(--orange-soft);
+  color: var(--orange);
+}
+
+.sidebar-footer {
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.empty-list {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 48px 24px;
+  text-align: center;
+  gap: 8px;
+}
+
+.empty-list svg { width: 40px; height: 40px; color: var(--text-muted); opacity: 0.3; }
+.empty-list .empty-title { font-size: 13px; color: var(--text-secondary); font-weight: 500; }
+.empty-list .empty-desc { font-size: 12px; color: var(--text-muted); }
+
+/* ── Main Panel ── */
+.main-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.toolbar {
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.toolbar-title {
+  font-size: 13px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.toolbar-status {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 5px;
+  font-weight: 500;
+}
+
+.toolbar-status.running { background: var(--green-soft); color: var(--green); }
+.toolbar-status.stopped { background: rgba(255,255,255,0.04); color: var(--text-muted); }
+.toolbar-status.exited { background: var(--orange-soft); color: var(--orange); }
+
+.toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.btn-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.btn-icon svg { width: 14px; height: 14px; }
+.btn-icon:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+.btn-icon.start { color: var(--green); border-color: rgba(104,211,145,0.2); }
+.btn-icon.start:hover { background: var(--green-soft); }
+.btn-icon.stop { color: var(--red); border-color: rgba(252,129,129,0.2); }
+.btn-icon.stop:hover { background: var(--red-soft); }
+.btn-icon.danger { color: var(--red); border-color: rgba(252,129,129,0.2); }
+.btn-icon.danger:hover { background: var(--red-soft); }
+
+.terminal-wrap {
+  flex: 1;
+  background: #0d0d0d;
+  padding: 4px;
+  overflow: hidden;
+  position: relative;
+}
+
+#terminal { height: 100%; }
+
+/* ── Empty State (main panel) ── */
+.main-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.main-empty-inner {
+  text-align: center;
+  max-width: 320px;
+}
+
+.main-empty-icon {
+  width: 72px; height: 72px;
+  margin: 0 auto 20px;
+  background: var(--bg-elevated);
+  border-radius: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border);
+}
+
+.main-empty-icon svg { width: 32px; height: 32px; color: var(--text-muted); }
+
+.main-empty h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.main-empty p {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin-bottom: 18px;
+}
+
+.btn-create-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 20px;
+  background: var(--accent);
+  color: #0a0a0f;
+  border: none;
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.btn-create-main:hover { background: #7cc4f0; transform: translateY(-1px); box-shadow: 0 4px 16px rgba(99,179,237,0.3); }
+
+/* ── Modal ── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.65);
+  backdrop-filter: blur(4px);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  animation: fadeIn 150ms ease;
+}
+
+.modal-overlay.show { display: flex; }
+
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes slideUp { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
+
+.modal {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 0;
+  width: 440px;
+  box-shadow: var(--shadow);
+  animation: slideUp 200ms ease;
+}
+
+.modal-header {
+  padding: 20px 24px 0;
+}
+
+.modal-header h2 {
+  font-size: 17px;
+  font-weight: 600;
+}
+
+.modal-header p {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+.modal-body {
+  padding: 20px 24px;
+}
+
+.field {
+  margin-bottom: 16px;
+}
+
+.field:last-child { margin-bottom: 0; }
+
+.field label {
+  display: block;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+
+.field input[type="text"] {
+  width: 100%;
+  padding: 9px 12px;
+  background: var(--bg-base);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border var(--transition);
+}
+
+.field input[type="text"]:focus { border-color: var(--accent); }
+
+.field input[type="text"]::placeholder { color: var(--text-muted); }
+
+.field .hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 4px;
+}
+
+.field-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.field-check input[type="checkbox"] {
+  width: 16px; height: 16px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.field-check span {
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.modal-footer {
+  padding: 16px 24px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.btn-modal {
+  padding: 8px 18px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--transition);
+  border: 1px solid var(--border);
+}
+
+.btn-modal.cancel {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.btn-modal.cancel:hover { background: var(--bg-hover); }
+
+.btn-modal.confirm {
+  background: var(--accent);
+  color: #0a0a0f;
+  border-color: transparent;
+  font-weight: 600;
+}
+
+.btn-modal.confirm:hover { background: #7cc4f0; }
+
+/* ── Toast ── */
+.toast-container {
+  position: fixed;
+  top: 60px;
+  right: 20px;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.toast {
+  padding: 10px 16px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+  color: var(--text-primary);
+  box-shadow: var(--shadow);
+  animation: slideIn 200ms ease, fadeOut 300ms ease 2.5s forwards;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.toast.success { border-color: rgba(104,211,145,0.3); }
+.toast.error { border-color: rgba(252,129,129,0.3); }
+
+@keyframes slideIn { from { opacity: 0; transform: translateX(20px); } to { opacity: 1; transform: translateX(0); } }
+@keyframes fadeOut { to { opacity: 0; transform: translateX(20px); } }
+
+/* ── Confirm Dialog ── */
+.confirm-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.65);
+  backdrop-filter: blur(4px);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 150;
+}
+
+.confirm-overlay.show { display: flex; }
+
+.confirm-box {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+  width: 360px;
+  box-shadow: var(--shadow);
+  text-align: center;
+  animation: slideUp 200ms ease;
+}
+
+.confirm-box h3 { font-size: 15px; margin-bottom: 8px; }
+.confirm-box p { font-size: 13px; color: var(--text-secondary); margin-bottom: 20px; }
+
+.confirm-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-brand">
+    <div class="header-logo">⬛</div>
+    <div class="header-title"><span>Console</span> Manager</div>
+  </div>
+  <div class="header-meta">
+    <div class="dot"></div>
+    <span id="statusText">就绪</span>
+  </div>
+</div>
+
+<!-- Layout -->
+<div class="layout">
+  <!-- Sidebar -->
+  <div class="sidebar">
+    <div class="sidebar-top">
+      <div class="sidebar-top-row">
+        <span class="sidebar-label">实例</span>
+        <button class="btn-new" onclick="showCreateModal()">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          新建
+        </button>
+      </div>
+      <div class="search-box">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        <input type="text" id="searchInput" placeholder="搜索控制台..." oninput="filterList()">
+      </div>
+    </div>
+    <div class="console-list" id="consoleList"></div>
+    <div class="sidebar-footer" id="sidebarFooter"></div>
+  </div>
+
+  <!-- Main -->
+  <div class="main-panel" id="mainPanel">
+    <div class="main-empty" id="emptyState">
+      <div class="main-empty-inner">
+        <div class="main-empty-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
+          </svg>
+        </div>
+        <h2>开始管理控制台</h2>
+        <p>创建一个新的控制台实例来运行命令、管理服务或执行脚本</p>
+        <button class="btn-create-main" onclick="showCreateModal()">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          创建控制台
+        </button>
+      </div>
+    </div>
+
+    <div id="terminalView" style="display:none;flex-direction:column;flex:1;">
+      <div class="toolbar">
+        <div class="toolbar-left">
+          <span class="toolbar-title" id="toolbarTitle">—</span>
+          <span class="toolbar-status" id="toolbarStatus"></span>
+        </div>
+        <div class="toolbar-actions" id="toolbarActions"></div>
+      </div>
+      <div class="terminal-wrap">
+        <div id="terminal"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Create Modal -->
+<div class="modal-overlay" id="createModal">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>新建控制台</h2>
+      <p>创建一个新的终端实例</p>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label>名称</label>
+        <input type="text" id="inputName" placeholder="例如: Web Server">
+      </div>
+      <div class="field">
+        <label>执行命令</label>
+        <input type="text" id="inputCommand" placeholder="/bin/bash">
+        <div class="hint">要执行的程序完整路径</div>
+      </div>
+      <div class="field">
+        <label>启动参数</label>
+        <input type="text" id="inputArgs" placeholder="例如: -c, echo hello">
+        <div class="hint">多个参数用逗号分隔</div>
+      </div>
+      <div class="field">
+        <label class="field-check">
+          <input type="checkbox" id="inputAutoStart" checked>
+          <span>创建后自动启动</span>
+        </label>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-modal cancel" onclick="hideCreateModal()">取消</button>
+      <button class="btn-modal confirm" onclick="createConsole()">创建</button>
+    </div>
+  </div>
+</div>
+
+<!-- Confirm Dialog -->
+<div class="confirm-overlay" id="confirmDialog">
+  <div class="confirm-box">
+    <h3 id="confirmTitle">确认操作</h3>
+    <p id="confirmMessage"></p>
+    <div class="confirm-actions">
+      <button class="btn-modal cancel" onclick="hideConfirm()">取消</button>
+      <button class="btn-modal confirm" id="confirmBtn" style="background:var(--red);border-color:transparent;">确认</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast Container -->
+<div class="toast-container" id="toastContainer"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
+<script>
+const API = '/api/consoles';
+let currentId = null;
+let term = null;
+let fitAddon = null;
+let ws = null;
+let allConsoles = [];
+let confirmCallback = null;
+
+/* ── Toast ── */
+function toast(msg, type = 'success') {
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.textContent = msg;
+  document.getElementById('toastContainer').appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+
+/* ── Confirm ── */
+function showConfirm(title, message, cb) {
+  document.getElementById('confirmTitle').textContent = title;
+  document.getElementById('confirmMessage').textContent = message;
+  confirmCallback = cb;
+  document.getElementById('confirmDialog').classList.add('show');
+}
+
+function hideConfirm() {
+  document.getElementById('confirmDialog').classList.remove('show');
+  confirmCallback = null;
+}
+
+document.getElementById('confirmBtn').onclick = () => {
+  if (confirmCallback) confirmCallback();
+  hideConfirm();
+};
+
+/* ── Terminal ── */
+function initTerminal() {
+  if (term) term.dispose();
+  term = new window.Terminal({
+    theme: {
+      background: '#0d0d0d',
+      foreground: '#d4d4d8',
+      cursor: '#63b3ed',
+      cursorAccent: '#0d0d0d',
+      selectionBackground: 'rgba(99,179,237,0.25)',
+      black: '#27272a', red: '#fc8181', green: '#68d391', yellow: '#f6ad55',
+      blue: '#63b3ed', magenta: '#b794f4', cyan: '#76e4f7', white: '#e4e4e7',
+      brightBlack: '#52525b', brightRed: '#feb2b2', brightGreen: '#9ae6b4',
+      brightYellow: '#fbd38d', brightBlue: '#90cdf4', brightMagenta: '#d6bcfa',
+      brightCyan: '#9decf9', brightWhite: '#fafafa'
+    },
+    fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace",
+    fontSize: 13,
+    lineHeight: 1.35,
+    cursorBlink: true,
+    cursorStyle: 'bar',
+    scrollback: 10000,
+    allowTransparency: true
+  });
+  fitAddon = new window.FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.loadAddon(new window.WebLinksAddon.WebLinksAddon());
+  term.open(document.getElementById('terminal'));
+  fitAddon.fit();
+
+  window.addEventListener('resize', () => fitAddon && fitAddon.fit());
+  new ResizeObserver(() => fitAddon && fitAddon.fit()).observe(document.getElementById('terminal'));
+}
+
+/* ── WebSocket ── */
+function connectWS(id) {
+  if (ws) { ws.close(); ws = null; }
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws/${id}`);
+  ws.binaryType = 'arraybuffer';
+
+  ws.onopen = () => {
+    const dims = fitAddon.proposeDimensions();
+    if (dims) ws.send(JSON.stringify({ type: 'resize', rows: dims.rows, cols: dims.cols }));
+  };
+
+  ws.onmessage = (ev) => {
+    if (ev.data instanceof ArrayBuffer) term.write(new Uint8Array(ev.data));
+    else term.write(ev.data);
+  };
+
+  ws.onclose = () => term.write('\r\n\x1b[38;2;99;179;237m[连接已断开]\x1b[0m\r\n');
+
+  term.onData((data) => { if (ws?.readyState === 1) ws.send(data); });
+  term.onResize(({ rows, cols }) => {
+    if (ws?.readyState === 1) ws.send(JSON.stringify({ type: 'resize', rows, cols }));
+  });
+}
+
+/* ── Select Console ── */
+function selectConsole(id) {
+  currentId = id;
+  document.getElementById('emptyState').style.display = 'none';
+  const tv = document.getElementById('terminalView');
+  tv.style.display = 'flex';
+  initTerminal();
+  connectWS(id);
+  renderList();
+  updateToolbar();
+}
+
+/* ── API ── */
+async function api(method, path, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(path, opts);
+  return res.json();
+}
+
+/* ── List ── */
+async function refreshList() {
+  const { data } = await api('GET', API);
+  allConsoles = data || [];
+  renderList();
+  if (currentId) updateToolbar();
+  document.getElementById('sidebarFooter').textContent = `${allConsoles.length} 个实例`;
+  document.getElementById('statusText').textContent =
+    `${allConsoles.filter(c => c.status === 'running').length} 运行中 / ${allConsoles.length} 总计`;
+}
+
+function renderList() {
+  const query = document.getElementById('searchInput').value.toLowerCase();
+  const filtered = allConsoles.filter(c =>
+    c.name.toLowerCase().includes(query) || c.command.toLowerCase().includes(query)
+  );
+  const list = document.getElementById('consoleList');
+  if (filtered.length === 0) {
+    list.innerHTML = `<div class="empty-list">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>
+      </svg>
+      <div class="empty-title">${allConsoles.length === 0 ? '暂无控制台' : '无匹配结果'}</div>
+      <div class="empty-desc">${allConsoles.length === 0 ? '点击「新建」创建' : '尝试其他关键词'}</div>
+    </div>`;
+    return;
+  }
+  list.innerHTML = filtered.map(c => `
+    <div class="console-item ${c.id === currentId ? 'active' : ''}" onclick="selectConsole('${c.id}')">
+      <div class="status-indicator ${c.status}"></div>
+      <div class="item-info">
+        <div class="item-name">${esc(c.name)}</div>
+        <div class="item-cmd">${esc(c.command)}${c.args?.length ? ' ' + esc(c.args.join(' ')) : ''}</div>
+      </div>
+      <span class="item-badge ${c.status}">${statusLabel(c.status)}</span>
+    </div>
+  `).join('');
+}
+
+function filterList() { renderList(); }
+
+function statusLabel(s) {
+  return { running: '运行中', stopped: '已停止', exited: '已退出' }[s] || s;
+}
+
+/* ── Toolbar ── */
+function updateToolbar() {
+  const c = allConsoles.find(x => x.id === currentId);
+  if (!c) return;
+  document.getElementById('toolbarTitle').textContent = c.name;
+  const st = document.getElementById('toolbarStatus');
+  st.textContent = statusLabel(c.status);
+  st.className = 'toolbar-status ' + c.status;
+
+  const acts = document.getElementById('toolbarActions');
+  let html = '';
+  if (c.status === 'running') {
+    html += `<button class="btn-icon stop" onclick="stopConsole('${c.id}')">
+      <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>停止</button>`;
+  } else {
+    html += `<button class="btn-icon start" onclick="startConsole('${c.id}')">
+      <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="6,4 20,12 6,20"/></svg>启动</button>`;
+  }
+  html += `<button class="btn-icon danger" onclick="confirmDelete('${c.id}','${esc(c.name)}')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>删除</button>`;
+  acts.innerHTML = html;
+}
+
+/* ── Actions ── */
+async function startConsole(id) {
+  await api('POST', `${API}/${id}/start`);
+  toast('控制台已启动');
+  await refreshList();
+  setTimeout(() => selectConsole(id), 300);
+}
+
+async function stopConsole(id) {
+  await api('POST', `${API}/${id}/stop`);
+  toast('控制台已停止');
+  refreshList();
+}
+
+function confirmDelete(id, name) {
+  showConfirm('删除控制台', `确定要删除「${name}」吗？此操作不可撤销。`, async () => {
+    await api('DELETE', `${API}/${id}`);
+    toast('已删除');
+    if (currentId === id) {
+      currentId = null;
+      if (term) { term.dispose(); term = null; }
+      document.getElementById('terminalView').style.display = 'none';
+      document.getElementById('emptyState').style.display = 'flex';
+    }
+    refreshList();
+  });
+}
+
+/* ── Modal ── */
+function showCreateModal() {
+  document.getElementById('inputName').value = '';
+  document.getElementById('inputCommand').value = '/bin/bash';
+  document.getElementById('inputArgs').value = '';
+  document.getElementById('inputAutoStart').checked = true;
+  document.getElementById('createModal').classList.add('show');
+  setTimeout(() => document.getElementById('inputName').focus(), 100);
+}
+
+function hideCreateModal() {
+  document.getElementById('createModal').classList.remove('show');
+}
+
+async function createConsole() {
+  const name = document.getElementById('inputName').value.trim();
+  const command = document.getElementById('inputCommand').value.trim();
+  const argsStr = document.getElementById('inputArgs').value.trim();
+  const autoStart = document.getElementById('inputAutoStart').checked;
+
+  if (!name) { toast('请输入名称', 'error'); return; }
+  if (!command) { toast('请输入命令', 'error'); return; }
+
+  const args = argsStr ? argsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
+  const { data, error } = await api('POST', API, { name, command, args, autoStart });
+  if (error) { toast(error, 'error'); return; }
+  hideCreateModal();
+  toast(`「${name}」已创建`);
+  await refreshList();
+  selectConsole(data.id);
+}
+
+/* ── Keyboard shortcuts ── */
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    hideCreateModal();
+    hideConfirm();
+  }
+});
+
+/* click outside modal to close */
+document.getElementById('createModal').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) hideCreateModal();
+});
+
+document.getElementById('confirmDialog').addEventListener('click', (e) => {
+  if (e.target === e.currentTarget) hideConfirm();
+});
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+/* ── Init ── */
+refreshList();
+setInterval(refreshList, 5000);
+</script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+[Unit]
+Description=Console Manager - Web Terminal Manager
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/console-manager
+ExecStart=/opt/console-manager/console-manager-linux-arm64
+Restart=always
+RestartSec=5
+Environment=PORT=8080
+
+[Install]
+WantedBy=multi-user.target
