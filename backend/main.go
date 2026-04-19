@@ -126,10 +126,146 @@ func (c *Console) broadcast(data []byte) {
 type ConsoleManager struct {
 	consoles map[string]*Console
 	mu       sync.RWMutex
+	persistPath string
+	persistMu   sync.Mutex
 }
 
 func NewConsoleManager() *ConsoleManager {
-	return &ConsoleManager{consoles: make(map[string]*Console)}
+	return &ConsoleManager{
+		consoles:    make(map[string]*Console),
+		persistPath: runtimeConfigPath(".consoles.json"),
+	}
+}
+
+type persistedConsole struct {
+	ID        string            `json:"id"`
+	Name      string            `json:"name"`
+	Command   string            `json:"command"`
+	Args      []string          `json:"args"`
+	WorkDir   string            `json:"workDir,omitempty"`
+	EnvVars   map[string]string `json:"envVars,omitempty"`
+	CreatedAt time.Time         `json:"createdAt"`
+	AutoStart bool              `json:"autoStart"`
+}
+
+func (cm *ConsoleManager) saveToDisk() error {
+	cm.mu.RLock()
+	records := make([]persistedConsole, 0, len(cm.consoles))
+	for _, c := range cm.consoles {
+		records = append(records, persistedConsole{
+			ID:        c.ID,
+			Name:      c.Name,
+			Command:   c.Command,
+			Args:      append([]string(nil), c.Args...),
+			WorkDir:   c.WorkDir,
+			EnvVars:   cloneEnvVars(c.EnvVars),
+			CreatedAt: c.CreatedAt,
+			AutoStart: c.AutoStart,
+		})
+	}
+	cm.mu.RUnlock()
+
+	sort.Slice(records, func(i, j int) bool {
+		if records[i].CreatedAt.Equal(records[j].CreatedAt) {
+			return records[i].ID < records[j].ID
+		}
+		return records[i].CreatedAt.Before(records[j].CreatedAt)
+	})
+
+	data, err := json.MarshalIndent(records, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal consoles: %w", err)
+	}
+
+	cm.persistMu.Lock()
+	defer cm.persistMu.Unlock()
+
+	tmpPath := cm.persistPath + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		return fmt.Errorf("write temp consoles file: %w", err)
+	}
+	if err := os.Rename(tmpPath, cm.persistPath); err != nil {
+		_ = os.Remove(cm.persistPath)
+		if err2 := os.Rename(tmpPath, cm.persistPath); err2 != nil {
+			_ = os.Remove(tmpPath)
+			return fmt.Errorf("replace consoles file: %w", err2)
+		}
+	}
+	return nil
+}
+
+func (cm *ConsoleManager) loadFromDisk() error {
+	cm.persistMu.Lock()
+	data, err := os.ReadFile(cm.persistPath)
+	cm.persistMu.Unlock()
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read consoles file: %w", err)
+	}
+
+	if len(data) == 0 {
+		return nil
+	}
+
+	var records []persistedConsole
+	if err := json.Unmarshal(data, &records); err != nil {
+		return fmt.Errorf("decode consoles file: %w", err)
+	}
+
+	loaded := make(map[string]*Console, len(records))
+	for _, record := range records {
+		id := strings.TrimSpace(record.ID)
+		command := strings.TrimSpace(record.Command)
+		if id == "" || command == "" {
+			continue
+		}
+
+		createdAt := record.CreatedAt
+		if createdAt.IsZero() {
+			createdAt = time.Now()
+		}
+
+		name := strings.TrimSpace(record.Name)
+		if name == "" {
+			name = command
+		}
+
+		loaded[id] = &Console{
+			ID:        id,
+			Name:      name,
+			Command:   command,
+			Args:      append([]string(nil), record.Args...),
+			WorkDir:   strings.TrimSpace(record.WorkDir),
+			EnvVars:   cloneEnvVars(record.EnvVars),
+			Status:    "stopped",
+			CreatedAt: createdAt,
+			AutoStart: record.AutoStart,
+			output:    NewRingBuffer(256 * 1024),
+		}
+	}
+
+	cm.mu.Lock()
+	cm.consoles = loaded
+	cm.mu.Unlock()
+	return nil
+}
+
+func (cm *ConsoleManager) restoreAutoStartConsoles() {
+	consoles := cm.List()
+	sort.Slice(consoles, func(i, j int) bool {
+		return consoles[i].CreatedAt.Before(consoles[j].CreatedAt)
+	})
+
+	for _, c := range consoles {
+		if !c.AutoStart {
+			continue
+		}
+		if err := cm.Start(c.ID); err != nil {
+			log.Printf("AutoStart failed for %s (%s): %v", c.Name, c.ID, err)
+		}
+	}
 }
 
 func (cm *ConsoleManager) Create(name, command string, args []string, workDir string, envVars map[string]string, autoStart bool) (*Console, error) {
@@ -159,6 +295,13 @@ func (cm *ConsoleManager) Create(name, command string, args []string, workDir st
 	cm.mu.Lock()
 	cm.consoles[c.ID] = c
 	cm.mu.Unlock()
+
+	if err := cm.saveToDisk(); err != nil {
+		cm.mu.Lock()
+		delete(cm.consoles, c.ID)
+		cm.mu.Unlock()
+		return nil, fmt.Errorf("failed to persist console: %w", err)
+	}
 
 	if autoStart {
 		return c, cm.Start(c.ID)
@@ -356,8 +499,11 @@ func (cm *ConsoleManager) StopAll() {
 func (cm *ConsoleManager) Delete(id string) error {
 	_ = cm.Stop(id)
 	cm.mu.Lock()
-	defer cm.mu.Unlock()
 	delete(cm.consoles, id)
+	cm.mu.Unlock()
+	if err := cm.saveToDisk(); err != nil {
+		return fmt.Errorf("failed to persist console deletion: %w", err)
+	}
 	return nil
 }
 
@@ -425,12 +571,16 @@ func jsonResp(w http.ResponseWriter, status int, resp APIResponse) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-func getOrCreateCredentials() (username, passwordHash string) {
+func runtimeConfigPath(filename string) string {
 	exe, err := os.Executable()
 	if err != nil {
-		exe = "."
+		return filepath.Join(".", filename)
 	}
-	configPath := filepath.Join(filepath.Dir(exe), ".credentials")
+	return filepath.Join(filepath.Dir(exe), filename)
+}
+
+func getOrCreateCredentials() (username, passwordHash string) {
+	configPath := runtimeConfigPath(".credentials")
 
 	if data, err := os.ReadFile(configPath); err == nil {
 		parts := strings.SplitN(strings.TrimSpace(string(data)), ":", 2)
@@ -513,11 +663,7 @@ func getOrCreatePort() string {
 	}
 
 	// Determine config file path next to the executable
-	exe, err := os.Executable()
-	if err != nil {
-		exe = "."
-	}
-	configPath := filepath.Join(filepath.Dir(exe), ".port")
+	configPath := runtimeConfigPath(".port")
 
 	// Try to read saved port
 	if data, err := os.ReadFile(configPath); err == nil {
@@ -542,6 +688,11 @@ func getOrCreatePort() string {
 
 func main() {
 	mgr := NewConsoleManager()
+	if err := mgr.loadFromDisk(); err != nil {
+		log.Printf("failed to load persisted consoles: %v", err)
+	}
+	mgr.restoreAutoStartConsoles()
+
 	addr := ":" + getOrCreatePort()
 	authUser, authPassHash := getOrCreateCredentials()
 

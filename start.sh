@@ -8,7 +8,7 @@ APP_BIN_ARM64="$APP_DIR/${APP_NAME}-linux-arm64"
 SOURCE_DIR="$APP_DIR/backend"
 PID_FILE="$APP_DIR/$APP_NAME.pid"
 LOG_FILE="$APP_DIR/$APP_NAME.log"
-PORT="${PORT:-8080}"
+PORT="${PORT:-}"
 
 Red='\033[0;31m'
 Green='\033[0;32m'
@@ -78,14 +78,22 @@ do_start() {
     fi
 
     echo -n "启动 $APP_NAME ... "
-    PORT="$PORT" nohup "$APP_BIN" >> "$LOG_FILE" 2>&1 &
+    if [ -n "$PORT" ]; then
+        PORT="$PORT" nohup "$APP_BIN" >> "$LOG_FILE" 2>&1 &
+    else
+        nohup "$APP_BIN" >> "$LOG_FILE" 2>&1 &
+    fi
     local pid=$!
     echo "$pid" > "$PID_FILE"
 
     sleep 1
     if is_running; then
+        local actual_port="$PORT"
+        if [ -z "$actual_port" ] && [ -f "$APP_DIR/.port" ]; then
+            actual_port=$(tr -d '[:space:]' < "$APP_DIR/.port")
+        fi
         echo -e "${Green}[✓] 已启动 (PID: $pid)${NC}"
-        echo -e "  访问地址: http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost'):$PORT"
+        echo -e "  访问地址: http://$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost'):${actual_port:-未知}"
         echo -e "  日志文件: $LOG_FILE"
     else
         echo -e "${Red}[✗] 启动失败，请检查日志: $LOG_FILE${NC}"
