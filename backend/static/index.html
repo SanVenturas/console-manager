@@ -508,7 +508,8 @@ body {
   margin-bottom: 6px;
 }
 
-.field input[type="text"] {
+.field input[type="text"],
+.field textarea {
   width: 100%;
   padding: 9px 12px;
   background: var(--bg-base);
@@ -521,9 +522,17 @@ body {
   transition: border var(--transition);
 }
 
-.field input[type="text"]:focus { border-color: var(--accent); }
+.field textarea {
+  min-height: 84px;
+  resize: vertical;
+  line-height: 1.4;
+}
 
-.field input[type="text"]::placeholder { color: var(--text-muted); }
+.field input[type="text"]:focus,
+.field textarea:focus { border-color: var(--accent); }
+
+.field input[type="text"]::placeholder,
+.field textarea::placeholder { color: var(--text-muted); }
 
 .field .hint {
   font-size: 11px;
@@ -758,6 +767,18 @@ body {
         <label>启动参数</label>
         <input type="text" id="inputArgs" placeholder="例如: -c, echo hello">
         <div class="hint">多个参数用逗号分隔</div>
+      </div>
+      <div class="field">
+        <label>工作目录</label>
+        <input type="text" id="inputWorkDir" placeholder="例如: /opt/my-app">
+        <div class="hint">项目根目录；用于读取该目录下的 .env/.conf</div>
+      </div>
+      <div class="field">
+        <label>环境变量</label>
+        <textarea id="inputEnvVars" placeholder="例如:
+PORT=3070
+NODE_ENV=production"></textarea>
+        <div class="hint">每行一个 KEY=VALUE；会覆盖继承环境</div>
       </div>
       <div class="field">
         <label class="field-check">
@@ -1008,6 +1029,8 @@ function showCreateModal() {
   document.getElementById('inputName').value = '';
   document.getElementById('inputCommand').value = '/bin/bash';
   document.getElementById('inputArgs').value = '';
+  document.getElementById('inputWorkDir').value = '';
+  document.getElementById('inputEnvVars').value = '';
   document.getElementById('inputAutoStart').checked = true;
   document.getElementById('createModal').classList.add('show');
   setTimeout(() => document.getElementById('inputName').focus(), 100);
@@ -1021,13 +1044,32 @@ async function createConsole() {
   const name = document.getElementById('inputName').value.trim();
   const command = document.getElementById('inputCommand').value.trim();
   const argsStr = document.getElementById('inputArgs').value.trim();
+  const workDir = document.getElementById('inputWorkDir').value.trim();
+  const envText = document.getElementById('inputEnvVars').value;
   const autoStart = document.getElementById('inputAutoStart').checked;
 
   if (!name) { toast('请输入名称', 'error'); return; }
   if (!command) { toast('请输入命令', 'error'); return; }
 
   const args = argsStr ? argsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
-  const { data, error } = await api('POST', API, { name, command, args, autoStart });
+  const envVars = {};
+  for (const rawLine of envText.split('\n')) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const idx = line.indexOf('=');
+    if (idx <= 0) {
+      toast(`环境变量格式错误: ${line}`, 'error');
+      return;
+    }
+    const key = line.slice(0, idx).trim();
+    if (!key) {
+      toast(`环境变量键不能为空: ${line}`, 'error');
+      return;
+    }
+    envVars[key] = line.slice(idx + 1);
+  }
+
+  const { data, error } = await api('POST', API, { name, command, args, workDir, envVars, autoStart });
   if (error) { toast(error, 'error'); return; }
   hideCreateModal();
   toast(`「${name}」已创建`);

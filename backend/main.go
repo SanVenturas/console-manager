@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -36,6 +37,8 @@ type Console struct {
 	Name      string    `json:"name"`
 	Command   string    `json:"command"`
 	Args      []string  `json:"args"`
+	WorkDir   string    `json:"workDir,omitempty"`
+	EnvVars   map[string]string `json:"envVars,omitempty"`
 	Status    string    `json:"status"` // "running", "stopped", "exited"
 	CreatedAt time.Time `json:"createdAt"`
 	ExitCode  int       `json:"exitCode"`
@@ -126,12 +129,24 @@ func NewConsoleManager() *ConsoleManager {
 	return &ConsoleManager{consoles: make(map[string]*Console)}
 }
 
-func (cm *ConsoleManager) Create(name, command string, args []string, autoStart bool) (*Console, error) {
+func (cm *ConsoleManager) Create(name, command string, args []string, workDir string, envVars map[string]string, autoStart bool) (*Console, error) {
+	if workDir != "" {
+		fi, err := os.Stat(workDir)
+		if err != nil {
+			return nil, fmt.Errorf("workDir not found: %w", err)
+		}
+		if !fi.IsDir() {
+			return nil, fmt.Errorf("workDir is not a directory: %s", workDir)
+		}
+	}
+
 	c := &Console{
 		ID:        uuid.New().String(),
 		Name:      name,
 		Command:   command,
 		Args:      args,
+		WorkDir:   workDir,
+		EnvVars:   cloneEnvVars(envVars),
 		Status:    "stopped",
 		CreatedAt: time.Now(),
 		AutoStart: autoStart,
@@ -165,6 +180,63 @@ func (cm *ConsoleManager) List() []*Console {
 	return list
 }
 
+func cloneEnvVars(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]string, len(src))
+	for key, value := range src {
+		k := strings.TrimSpace(key)
+		if k == "" {
+			continue
+		}
+		dst[k] = value
+	}
+	if len(dst) == 0 {
+		return nil
+	}
+	return dst
+}
+
+func buildCommandEnv(overrides map[string]string) []string {
+	envMap := make(map[string]string)
+	for _, e := range os.Environ() {
+		key, value, ok := strings.Cut(e, "=")
+		if !ok || key == "" {
+			continue
+		}
+		// Prevent manager PORT from leaking into instance process.
+		if key == "PORT" {
+			continue
+		}
+		envMap[key] = value
+	}
+	if _, ok := envMap["TERM"]; !ok || envMap["TERM"] == "" {
+		envMap["TERM"] = "xterm-256color"
+	}
+	envMap["CONSOLE_MANAGER"] = "true"
+
+	for key, value := range overrides {
+		k := strings.TrimSpace(key)
+		if k == "" {
+			continue
+		}
+		envMap[k] = value
+	}
+
+	keys := make([]string, 0, len(envMap))
+	for key := range envMap {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		out = append(out, key+"="+envMap[key])
+	}
+	return out
+}
+
 func (cm *ConsoleManager) Start(id string) error {
 	c, ok := cm.Get(id)
 	if !ok {
@@ -179,7 +251,10 @@ func (cm *ConsoleManager) Start(id string) error {
 	}
 
 	c.cmd = exec.Command(c.Command, c.Args...)
-	c.cmd.Env = os.Environ()
+	if c.WorkDir != "" {
+		c.cmd.Dir = c.WorkDir
+	}
+	c.cmd.Env = buildCommandEnv(c.EnvVars)
 
 	ptmx, err := pty.Start(c.cmd)
 	if err != nil {
@@ -303,6 +378,8 @@ type CreateRequest struct {
 	Name      string   `json:"name"`
 	Command   string   `json:"command"`
 	Args      []string `json:"args"`
+	WorkDir   string   `json:"workDir"`
+	EnvVars   map[string]string `json:"envVars"`
 	AutoStart bool     `json:"autoStart"`
 }
 
@@ -464,7 +541,13 @@ func main() {
 			if req.Name == "" {
 				req.Name = req.Command
 			}
-			c, err := mgr.Create(req.Name, req.Command, req.Args, req.AutoStart)
+			req.WorkDir = strings.TrimSpace(req.WorkDir)
+			if req.WorkDir != "" {
+				if abs, err := filepath.Abs(req.WorkDir); err == nil {
+					req.WorkDir = abs
+				}
+			}
+			c, err := mgr.Create(req.Name, req.Command, req.Args, req.WorkDir, req.EnvVars, req.AutoStart)
 			if err != nil {
 				jsonResp(w, 500, APIResponse{Error: err.Error()})
 				return
