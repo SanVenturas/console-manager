@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -14,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"sort"
@@ -327,6 +330,27 @@ func (cm *ConsoleManager) Stop(id string) error {
 		c.ptmx = nil
 	}
 	return nil
+}
+
+func (cm *ConsoleManager) StopAll() {
+	consoles := cm.List()
+	sort.Slice(consoles, func(i, j int) bool {
+		return consoles[i].CreatedAt.Before(consoles[j].CreatedAt)
+	})
+
+	for _, c := range consoles {
+		c.mu.Lock()
+		running := c.Status == "running"
+		c.mu.Unlock()
+		if !running {
+			continue
+		}
+
+		log.Printf("Stopping instance %s (%s)", c.Name, c.ID)
+		if err := cm.Stop(c.ID); err != nil {
+			log.Printf("Failed to stop instance %s (%s): %v", c.Name, c.ID, err)
+		}
+	}
 }
 
 func (cm *ConsoleManager) Delete(id string) error {
@@ -692,7 +716,31 @@ func main() {
 
 	log.Printf("Console Manager starting on %s", addr)
 	handler := basicAuthMiddleware(authUser, authPassHash, mux)
-	if err := http.ListenAndServe(addr, handler); err != nil {
+	server := &http.Server{Addr: addr, Handler: handler}
+
+	sigCtx, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stopSignals()
+
+	serverErr := make(chan error, 1)
+	go func() {
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serverErr <- err
+		}
+	}()
+
+	select {
+	case err := <-serverErr:
 		log.Fatal(err)
+	case <-sigCtx.Done():
+		log.Printf("Shutdown signal received, stopping all instances...")
 	}
+
+	mgr.StopAll()
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
+	}
+	log.Printf("Console Manager stopped")
 }

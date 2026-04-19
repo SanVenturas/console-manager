@@ -103,16 +103,18 @@ do_stop() {
 
     local pid
     pid=$(cat "$PID_FILE")
-    echo -n "停止 $APP_NAME (PID: $pid) ... "
-    kill "$pid"
+    echo -n "停止 $APP_NAME (PID: $pid，先停止实例) ... "
+    kill -TERM "$pid"
 
     local i=0
-    while kill -0 "$pid" 2>/dev/null && [ $i -lt 10 ]; do
+    local max_wait=20
+    while kill -0 "$pid" 2>/dev/null && [ $i -lt $max_wait ]; do
         sleep 1
         i=$((i + 1))
     done
 
     if kill -0 "$pid" 2>/dev/null; then
+        echo -e "${Yellow}[!] 等待优雅停止超时，执行强制停止${NC}"
         kill -9 "$pid"
         sleep 1
     fi
