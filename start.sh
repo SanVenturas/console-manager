@@ -1,10 +1,11 @@
 #!/bin/bash
 # Console Manager 启动/停止/状态管理脚本
-# 关闭 SSH 后应用继续运行
 
 APP_NAME="console-manager"
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 APP_BIN="$APP_DIR/$APP_NAME"
+APP_BIN_ARM64="$APP_DIR/${APP_NAME}-linux-arm64"
+SOURCE_DIR="$APP_DIR/backend"
 PID_FILE="$APP_DIR/$APP_NAME.pid"
 LOG_FILE="$APP_DIR/$APP_NAME.log"
 PORT="${PORT:-8080}"
@@ -36,18 +37,42 @@ is_running() {
     return 1
 }
 
+build_binary() {
+    if ! command -v go >/dev/null 2>&1; then
+        echo -e "${Red}[✗] 未找到 Go 环境，无法自动编译${NC}"
+        echo "    请先安装 Go，或手动上传已编译的可执行文件"
+        return 1
+    fi
+
+    if [ ! -f "$SOURCE_DIR/go.mod" ]; then
+        echo -e "${Red}[✗] 未找到源码目录: $SOURCE_DIR${NC}"
+        echo "    请确保 backend 源码存在，或手动上传已编译的可执行文件"
+        return 1
+    fi
+
+    echo -e "${Yellow}[*] 未检测到可执行文件，开始自动编译...${NC}"
+    if (cd "$SOURCE_DIR" && CGO_ENABLED=0 go build -o "$APP_BIN" -ldflags="-s -w" .); then
+        chmod +x "$APP_BIN"
+        echo -e "${Green}[✓] 编译完成: $APP_BIN${NC}"
+        return 0
+    fi
+
+    echo -e "${Red}[✗] 自动编译失败${NC}"
+    return 1
+}
+
 do_start() {
     if is_running; then
         echo -e "${Yellow}[!] $APP_NAME 已在运行 (PID: $(cat "$PID_FILE"))${NC}"
         return 1
     fi
 
-    if [ ! -x "$APP_BIN" ]; then
-        # 尝试找 arm64 版本
-        if [ -x "$APP_DIR/${APP_NAME}-linux-arm64" ]; then
-            APP_BIN="$APP_DIR/${APP_NAME}-linux-arm64"
-        else
-            echo -e "${Red}[✗] 找不到可执行文件: $APP_BIN${NC}"
+    if [ -x "$APP_BIN" ]; then
+        :
+    elif [ -x "$APP_BIN_ARM64" ]; then
+        APP_BIN="$APP_BIN_ARM64"
+    else
+        if ! build_binary; then
             exit 1
         fi
     fi
