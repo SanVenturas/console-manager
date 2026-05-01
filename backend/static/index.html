@@ -750,8 +750,8 @@ body {
 <div class="modal-overlay" id="createModal">
   <div class="modal">
     <div class="modal-header">
-      <h2>新建控制台</h2>
-      <p>创建一个新的终端实例</p>
+      <h2 id="modalTitle">新建控制台</h2>
+      <p id="modalDesc">创建一个新的终端实例</p>
     </div>
     <div class="modal-body">
       <div class="field">
@@ -759,37 +759,19 @@ body {
         <input type="text" id="inputName" placeholder="例如: Web Server">
       </div>
       <div class="field">
-        <label>执行命令</label>
-        <input type="text" id="inputCommand" placeholder="/bin/bash">
-        <div class="hint">要执行的程序完整路径</div>
-      </div>
-      <div class="field">
-        <label>启动参数</label>
-        <input type="text" id="inputArgs" placeholder="例如: -c, echo hello">
-        <div class="hint">多个参数用逗号分隔</div>
+        <label>启动命令</label>
+        <input type="text" id="inputCommand" placeholder="例如: ./start.sh">
+        <div class="hint">完整命令行，例如: java -jar start.jar nogui</div>
       </div>
       <div class="field">
         <label>工作目录</label>
         <input type="text" id="inputWorkDir" placeholder="例如: /opt/my-app">
-        <div class="hint">项目根目录；用于读取该目录下的 .env/.conf</div>
-      </div>
-      <div class="field">
-        <label>环境变量</label>
-        <textarea id="inputEnvVars" placeholder="例如:
-PORT=3070
-NODE_ENV=production"></textarea>
-        <div class="hint">每行一个 KEY=VALUE；会覆盖继承环境</div>
-      </div>
-      <div class="field">
-        <label class="field-check">
-          <input type="checkbox" id="inputAutoStart" checked>
-          <span>创建后自动启动</span>
-        </label>
+        <div class="hint">项目根目录</div>
       </div>
     </div>
     <div class="modal-footer">
       <button class="btn-modal cancel" onclick="hideCreateModal()">取消</button>
-      <button class="btn-modal confirm" onclick="createConsole()">创建</button>
+      <button class="btn-modal confirm" id="modalConfirm" onclick="submitConsole()">创建</button>
     </div>
   </div>
 </div>
@@ -820,6 +802,8 @@ let fitAddon = null;
 let ws = null;
 let allConsoles = [];
 let confirmCallback = null;
+let editTargetId = null;
+let editTargetStatus = null;
 
 /* ── Toast ── */
 function toast(msg, type = 'success') {
@@ -991,6 +975,8 @@ function updateToolbar() {
     html += `<button class="btn-icon start" onclick="startConsole('${c.id}')">
       <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="6,4 20,12 6,20"/></svg>启动</button>`;
   }
+  html += `<button class="btn-icon" onclick="showEditModal('${c.id}')">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>编辑</button>`;
   html += `<button class="btn-icon danger" onclick="confirmDelete('${c.id}','${esc(c.name)}')">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>删除</button>`;
   acts.innerHTML = html;
@@ -1025,13 +1011,41 @@ function confirmDelete(id, name) {
 }
 
 /* ── Modal ── */
+function setModalMode(mode, status) {
+  const title = document.getElementById('modalTitle');
+  const desc = document.getElementById('modalDesc');
+  const btn = document.getElementById('modalConfirm');
+  if (mode === 'edit') {
+    title.textContent = '编辑控制台';
+    desc.textContent = status === 'running' ? '修改配置后需要重启生效' : '更新控制台配置';
+    btn.textContent = '保存';
+  } else {
+    title.textContent = '新建控制台';
+    desc.textContent = '创建一个新的终端实例';
+    btn.textContent = '创建';
+  }
+}
+
 function showCreateModal() {
+  editTargetId = null;
+  editTargetStatus = null;
+  setModalMode('create');
   document.getElementById('inputName').value = '';
-  document.getElementById('inputCommand').value = '/bin/bash';
-  document.getElementById('inputArgs').value = '';
+  document.getElementById('inputCommand').value = '';
   document.getElementById('inputWorkDir').value = '';
-  document.getElementById('inputEnvVars').value = '';
-  document.getElementById('inputAutoStart').checked = true;
+  document.getElementById('createModal').classList.add('show');
+  setTimeout(() => document.getElementById('inputName').focus(), 100);
+}
+
+function showEditModal(id) {
+  const c = allConsoles.find(x => x.id === id);
+  if (!c) return;
+  editTargetId = id;
+  editTargetStatus = c.status;
+  setModalMode('edit', c.status);
+  document.getElementById('inputName').value = c.name || '';
+  document.getElementById('inputCommand').value = formatCommandLine(c.command, c.args || []);
+  document.getElementById('inputWorkDir').value = c.workDir || '';
   document.getElementById('createModal').classList.add('show');
   setTimeout(() => document.getElementById('inputName').focus(), 100);
 }
@@ -1040,41 +1054,93 @@ function hideCreateModal() {
   document.getElementById('createModal').classList.remove('show');
 }
 
-async function createConsole() {
+async function submitConsole() {
   const name = document.getElementById('inputName').value.trim();
-  const command = document.getElementById('inputCommand').value.trim();
-  const argsStr = document.getElementById('inputArgs').value.trim();
+  const commandLine = document.getElementById('inputCommand').value.trim();
   const workDir = document.getElementById('inputWorkDir').value.trim();
-  const envText = document.getElementById('inputEnvVars').value;
-  const autoStart = document.getElementById('inputAutoStart').checked;
 
   if (!name) { toast('请输入名称', 'error'); return; }
-  if (!command) { toast('请输入命令', 'error'); return; }
+  if (!commandLine) { toast('请输入启动命令', 'error'); return; }
 
-  const args = argsStr ? argsStr.split(',').map(s => s.trim()).filter(Boolean) : [];
-  const envVars = {};
-  for (const rawLine of envText.split('\n')) {
-    const line = rawLine.trim();
-    if (!line || line.startsWith('#')) continue;
-    const idx = line.indexOf('=');
-    if (idx <= 0) {
-      toast(`环境变量格式错误: ${line}`, 'error');
-      return;
-    }
-    const key = line.slice(0, idx).trim();
-    if (!key) {
-      toast(`环境变量键不能为空: ${line}`, 'error');
-      return;
-    }
-    envVars[key] = line.slice(idx + 1);
+  const tokens = parseCommandLine(commandLine);
+  if (tokens.length === 0) { toast('请输入启动命令', 'error'); return; }
+  const command = tokens[0];
+  const args = tokens.slice(1);
+
+  if (editTargetId) {
+    const { error } = await api('PUT', `${API}/${editTargetId}`, { name, command, args, workDir });
+    if (error) { toast(error, 'error'); return; }
+    hideCreateModal();
+    toast(editTargetStatus === 'running' ? '已更新，重启后生效' : '已更新');
+    await refreshList();
+    if (currentId) updateToolbar();
+    return;
   }
 
+  const envVars = {};
+  const autoStart = true;
   const { data, error } = await api('POST', API, { name, command, args, workDir, envVars, autoStart });
   if (error) { toast(error, 'error'); return; }
   hideCreateModal();
   toast(`「${name}」已创建`);
   await refreshList();
   selectConsole(data.id);
+}
+
+function formatCommandLine(command, args) {
+  const tokens = [command, ...(args || [])].filter(Boolean);
+  return tokens.map(quoteToken).join(' ');
+}
+
+function quoteToken(token) {
+  if (!/[\s"'\\]/.test(token)) return token;
+  const escaped = token.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return `"${escaped}"`;
+}
+
+function parseCommandLine(input) {
+  const out = [];
+  let buf = '';
+  let quote = null;
+  let escape = false;
+
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (escape) {
+      buf += ch;
+      escape = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escape = true;
+      continue;
+    }
+    if (quote) {
+      if (ch === quote) {
+        quote = null;
+      } else {
+        buf += ch;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (buf) {
+        out.push(buf);
+        buf = '';
+      }
+      continue;
+    }
+    buf += ch;
+  }
+  if (escape) {
+    buf += '\\';
+  }
+  if (buf) out.push(buf);
+  return out;
 }
 
 /* ── Keyboard shortcuts ── */

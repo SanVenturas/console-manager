@@ -309,6 +309,55 @@ func (cm *ConsoleManager) Create(name, command string, args []string, workDir st
 	return c, nil
 }
 
+func (cm *ConsoleManager) Update(id, name, command string, args []string, workDir string) (*Console, error) {
+	command = strings.TrimSpace(command)
+	name = strings.TrimSpace(name)
+	workDir = strings.TrimSpace(workDir)
+	if command == "" {
+		return nil, fmt.Errorf("command is required")
+	}
+	if name == "" {
+		name = command
+	}
+	if workDir != "" {
+		fi, err := os.Stat(workDir)
+		if err != nil {
+			return nil, fmt.Errorf("workDir not found: %w", err)
+		}
+		if !fi.IsDir() {
+			return nil, fmt.Errorf("workDir is not a directory: %s", workDir)
+		}
+	}
+
+	c, ok := cm.Get(id)
+	if !ok {
+		return nil, fmt.Errorf("console not found: %s", id)
+	}
+
+	c.mu.Lock()
+	prevName := c.Name
+	prevCommand := c.Command
+	prevArgs := append([]string(nil), c.Args...)
+	prevWorkDir := c.WorkDir
+	c.Name = name
+	c.Command = command
+	c.Args = append([]string(nil), args...)
+	c.WorkDir = workDir
+	c.mu.Unlock()
+
+	if err := cm.saveToDisk(); err != nil {
+		c.mu.Lock()
+		c.Name = prevName
+		c.Command = prevCommand
+		c.Args = prevArgs
+		c.WorkDir = prevWorkDir
+		c.mu.Unlock()
+		return nil, fmt.Errorf("failed to persist console update: %w", err)
+	}
+
+	return c, nil
+}
+
 func (cm *ConsoleManager) Get(id string) (*Console, bool) {
 	cm.mu.RLock()
 	defer cm.mu.RUnlock()
@@ -553,6 +602,13 @@ type CreateRequest struct {
 	AutoStart bool     `json:"autoStart"`
 }
 
+type UpdateRequest struct {
+	Name    string   `json:"name"`
+	Command string   `json:"command"`
+	Args    []string `json:"args"`
+	WorkDir string   `json:"workDir"`
+}
+
 type ResizeMsg struct {
 	Type string `json:"type"`
 	Rows uint16 `json:"rows"`
@@ -762,6 +818,32 @@ func main() {
 				return
 			}
 			jsonResp(w, 200, APIResponse{Success: true})
+
+		case action == "" && r.Method == http.MethodPut:
+			var req UpdateRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				jsonResp(w, 400, APIResponse{Error: err.Error()})
+				return
+			}
+			if req.Command == "" {
+				jsonResp(w, 400, APIResponse{Error: "command is required"})
+				return
+			}
+			if req.Name == "" {
+				req.Name = req.Command
+			}
+			req.WorkDir = strings.TrimSpace(req.WorkDir)
+			if req.WorkDir != "" {
+				if abs, err := filepath.Abs(req.WorkDir); err == nil {
+					req.WorkDir = abs
+				}
+			}
+			c, err := mgr.Update(id, req.Name, req.Command, req.Args, req.WorkDir)
+			if err != nil {
+				jsonResp(w, 500, APIResponse{Error: err.Error()})
+				return
+			}
+			jsonResp(w, 200, APIResponse{Success: true, Data: c})
 
 		case action == "start" && r.Method == http.MethodPost:
 			if err := mgr.Start(id); err != nil {
