@@ -1203,14 +1203,8 @@ function parseCommandLine(input) {
 /* ── Keyboard shortcuts ── */
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    hideCreateModal();
     hideConfirm();
   }
-});
-
-/* click outside modal to close */
-document.getElementById('createModal').addEventListener('click', (e) => {
-  if (e.target === e.currentTarget) hideCreateModal();
 });
 
 document.getElementById('confirmDialog').addEventListener('click', (e) => {
