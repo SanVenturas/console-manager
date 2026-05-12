@@ -233,6 +233,10 @@ body {
 
 .console-item .status-indicator.stopped { background: var(--text-muted); }
 .console-item .status-indicator.exited { background: var(--orange); }
+.console-item .status-indicator.updating {
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(99,179,237,0.45);
+}
 
 .console-item .item-info {
   flex: 1;
@@ -278,6 +282,11 @@ body {
 .console-item .item-badge.exited {
   background: var(--orange-soft);
   color: var(--orange);
+}
+
+.console-item .item-badge.updating {
+  background: rgba(99,179,237,0.14);
+  color: var(--accent);
 }
 
 .sidebar-footer {
@@ -346,6 +355,7 @@ body {
 .toolbar-status.running { background: var(--green-soft); color: var(--green); }
 .toolbar-status.stopped { background: rgba(255,255,255,0.04); color: var(--text-muted); }
 .toolbar-status.exited { background: var(--orange-soft); color: var(--orange); }
+.toolbar-status.updating { background: rgba(99,179,237,0.14); color: var(--accent); }
 
 .toolbar-actions {
   display: flex;
@@ -377,8 +387,14 @@ body {
 .btn-icon.start:hover { background: var(--green-soft); }
 .btn-icon.stop { color: var(--red); border-color: rgba(252,129,129,0.2); }
 .btn-icon.stop:hover { background: var(--red-soft); }
+.btn-icon.update { color: var(--accent); border-color: rgba(99,179,237,0.22); }
+.btn-icon.update:hover { background: rgba(99,179,237,0.12); }
 .btn-icon.danger { color: var(--red); border-color: rgba(252,129,129,0.2); }
 .btn-icon.danger:hover { background: var(--red-soft); }
+.btn-icon:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
 
 .terminal-wrap {
   flex: 1;
@@ -768,6 +784,11 @@ body {
         <input type="text" id="inputWorkDir" placeholder="例如: /opt/my-app">
         <div class="hint">项目根目录</div>
       </div>
+      <div class="field">
+        <label>更新指令</label>
+        <input type="text" id="inputUpdateCommand" placeholder="例如: git pull && npm install">
+        <div class="hint">点击主面板「更新」时执行，支持 shell 语法</div>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn-modal cancel" onclick="hideCreateModal()">取消</button>
@@ -954,7 +975,7 @@ function renderList() {
 function filterList() { renderList(); }
 
 function statusLabel(s) {
-  return { running: '运行中', stopped: '已停止', exited: '已退出' }[s] || s;
+  return { running: '运行中', stopped: '已停止', exited: '已退出', updating: '更新中' }[s] || s;
 }
 
 /* ── Toolbar ── */
@@ -967,17 +988,25 @@ function updateToolbar() {
   st.className = 'toolbar-status ' + c.status;
 
   const acts = document.getElementById('toolbarActions');
+  const busy = c.status === 'updating';
+  const hasUpdate = !!(c.updateCommand && c.updateCommand.trim());
+  const updateTitle = busy ? '更新中' : (hasUpdate ? '更新实例' : '未配置更新指令');
   let html = '';
-  if (c.status === 'running') {
+  if (busy) {
+    html += `<button class="btn-icon" disabled>
+      <svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 4a8 8 0 108 8h-2a6 6 0 11-6-6V4z"/></svg>更新中</button>`;
+  } else if (c.status === 'running') {
     html += `<button class="btn-icon stop" onclick="stopConsole('${c.id}')">
       <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>停止</button>`;
   } else {
     html += `<button class="btn-icon start" onclick="startConsole('${c.id}')">
       <svg viewBox="0 0 24 24" fill="currentColor"><polygon points="6,4 20,12 6,20"/></svg>启动</button>`;
   }
-  html += `<button class="btn-icon" onclick="showEditModal('${c.id}')">
+  html += `<button class="btn-icon update" title="${updateTitle}" ${busy || !hasUpdate ? 'disabled' : `onclick="updateConsole('${c.id}')"`}>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 11-3-6.7"/><polyline points="21 3 21 9 15 9"/></svg>${busy ? '更新中' : '更新'}</button>`;
+  html += `<button class="btn-icon" ${busy ? 'disabled' : `onclick="showEditModal('${c.id}')"`}>
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>编辑</button>`;
-  html += `<button class="btn-icon danger" onclick="confirmDelete('${c.id}','${esc(c.name)}')">
+  html += `<button class="btn-icon danger" ${busy ? 'disabled' : `onclick="confirmDelete('${c.id}','${esc(c.name)}')"`}>
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>删除</button>`;
   acts.innerHTML = html;
 }
@@ -994,6 +1023,31 @@ async function stopConsole(id) {
   await api('POST', `${API}/${id}/stop`);
   toast('控制台已停止');
   refreshList();
+}
+
+async function updateConsole(id) {
+  const c = allConsoles.find(x => x.id === id);
+  if (!c || !c.updateCommand || !c.updateCommand.trim()) {
+    toast('请先配置更新指令', 'error');
+    return;
+  }
+
+  showConfirm('更新实例', `将停止「${c.name}」、执行更新指令并重启。继续吗？`, async () => {
+    toast('开始更新');
+    const request = api('POST', `${API}/${id}/update`);
+    setTimeout(refreshList, 300);
+    const { error } = await request;
+    if (error) {
+      toast(error, 'error');
+      await refreshList();
+      return;
+    }
+    toast('更新完成');
+    await refreshList();
+    if (currentId === id) {
+      setTimeout(() => selectConsole(id), 300);
+    }
+  });
 }
 
 function confirmDelete(id, name) {
@@ -1033,6 +1087,7 @@ function showCreateModal() {
   document.getElementById('inputName').value = '';
   document.getElementById('inputCommand').value = '';
   document.getElementById('inputWorkDir').value = '';
+  document.getElementById('inputUpdateCommand').value = '';
   document.getElementById('createModal').classList.add('show');
   setTimeout(() => document.getElementById('inputName').focus(), 100);
 }
@@ -1046,6 +1101,7 @@ function showEditModal(id) {
   document.getElementById('inputName').value = c.name || '';
   document.getElementById('inputCommand').value = formatCommandLine(c.command, c.args || []);
   document.getElementById('inputWorkDir').value = c.workDir || '';
+  document.getElementById('inputUpdateCommand').value = c.updateCommand || '';
   document.getElementById('createModal').classList.add('show');
   setTimeout(() => document.getElementById('inputName').focus(), 100);
 }
@@ -1058,6 +1114,7 @@ async function submitConsole() {
   const name = document.getElementById('inputName').value.trim();
   const commandLine = document.getElementById('inputCommand').value.trim();
   const workDir = document.getElementById('inputWorkDir').value.trim();
+  const updateCommand = document.getElementById('inputUpdateCommand').value.trim();
 
   if (!name) { toast('请输入名称', 'error'); return; }
   if (!commandLine) { toast('请输入启动命令', 'error'); return; }
@@ -1068,7 +1125,7 @@ async function submitConsole() {
   const args = tokens.slice(1);
 
   if (editTargetId) {
-    const { error } = await api('PUT', `${API}/${editTargetId}`, { name, command, args, workDir });
+    const { error } = await api('PUT', `${API}/${editTargetId}`, { name, command, args, workDir, updateCommand });
     if (error) { toast(error, 'error'); return; }
     hideCreateModal();
     toast(editTargetStatus === 'running' ? '已更新，重启后生效' : '已更新');
@@ -1079,7 +1136,7 @@ async function submitConsole() {
 
   const envVars = {};
   const autoStart = true;
-  const { data, error } = await api('POST', API, { name, command, args, workDir, envVars, autoStart });
+  const { data, error } = await api('POST', API, { name, command, args, workDir, envVars, updateCommand, autoStart });
   if (error) { toast(error, 'error'); return; }
   hideCreateModal();
   toast(`「${name}」已创建`);

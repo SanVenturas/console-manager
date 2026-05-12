@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"net"
@@ -18,8 +19,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strconv"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -36,23 +37,27 @@ var staticFiles embed.FS
 
 // Console represents a managed console instance
 type Console struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Command   string    `json:"command"`
-	Args      []string  `json:"args"`
-	WorkDir   string    `json:"workDir,omitempty"`
-	EnvVars   map[string]string `json:"envVars,omitempty"`
-	Status    string    `json:"status"` // "running", "stopped", "exited"
-	CreatedAt time.Time `json:"createdAt"`
-	ExitCode  int       `json:"exitCode"`
-	AutoStart bool      `json:"autoStart"`
+	ID            string            `json:"id"`
+	Name          string            `json:"name"`
+	Command       string            `json:"command"`
+	Args          []string          `json:"args"`
+	WorkDir       string            `json:"workDir,omitempty"`
+	EnvVars       map[string]string `json:"envVars,omitempty"`
+	UpdateCommand string            `json:"updateCommand,omitempty"`
+	Status        string            `json:"status"` // "running", "stopped", "exited", "updating"
+	CreatedAt     time.Time         `json:"createdAt"`
+	ExitCode      int               `json:"exitCode"`
+	AutoStart     bool              `json:"autoStart"`
 
-	cmd       *exec.Cmd
-	ptmx      *os.File
-	mu        sync.Mutex
-	output    *RingBuffer
-	listeners map[chan []byte]struct{}
-	lmu       sync.Mutex
+	cmd           *exec.Cmd
+	ptmx          *os.File
+	mu            sync.Mutex
+	opMu          sync.Mutex
+	output        *RingBuffer
+	listeners     map[chan []byte]struct{}
+	lmu           sync.Mutex
+	stopRequested bool
+	waitDone      chan struct{}
 }
 
 // RingBuffer stores the last N bytes of output for replay
@@ -122,10 +127,24 @@ func (c *Console) broadcast(data []byte) {
 	}
 }
 
+func (c *Console) writeOutput(data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	buf := make([]byte, len(data))
+	copy(buf, data)
+	c.output.Write(buf)
+	c.broadcast(buf)
+}
+
+func (c *Console) writeSystemMessage(format string, args ...interface{}) {
+	c.writeOutput([]byte(fmt.Sprintf("\r\n[Console Manager] "+format+"\r\n", args...)))
+}
+
 // ConsoleManager manages all console instances
 type ConsoleManager struct {
-	consoles map[string]*Console
-	mu       sync.RWMutex
+	consoles    map[string]*Console
+	mu          sync.RWMutex
 	persistPath string
 	persistMu   sync.Mutex
 }
@@ -138,14 +157,15 @@ func NewConsoleManager() *ConsoleManager {
 }
 
 type persistedConsole struct {
-	ID        string            `json:"id"`
-	Name      string            `json:"name"`
-	Command   string            `json:"command"`
-	Args      []string          `json:"args"`
-	WorkDir   string            `json:"workDir,omitempty"`
-	EnvVars   map[string]string `json:"envVars,omitempty"`
-	CreatedAt time.Time         `json:"createdAt"`
-	AutoStart bool              `json:"autoStart"`
+	ID            string            `json:"id"`
+	Name          string            `json:"name"`
+	Command       string            `json:"command"`
+	Args          []string          `json:"args"`
+	WorkDir       string            `json:"workDir,omitempty"`
+	EnvVars       map[string]string `json:"envVars,omitempty"`
+	UpdateCommand string            `json:"updateCommand,omitempty"`
+	CreatedAt     time.Time         `json:"createdAt"`
+	AutoStart     bool              `json:"autoStart"`
 }
 
 func (cm *ConsoleManager) saveToDisk() error {
@@ -153,14 +173,15 @@ func (cm *ConsoleManager) saveToDisk() error {
 	records := make([]persistedConsole, 0, len(cm.consoles))
 	for _, c := range cm.consoles {
 		records = append(records, persistedConsole{
-			ID:        c.ID,
-			Name:      c.Name,
-			Command:   c.Command,
-			Args:      append([]string(nil), c.Args...),
-			WorkDir:   c.WorkDir,
-			EnvVars:   cloneEnvVars(c.EnvVars),
-			CreatedAt: c.CreatedAt,
-			AutoStart: c.AutoStart,
+			ID:            c.ID,
+			Name:          c.Name,
+			Command:       c.Command,
+			Args:          append([]string(nil), c.Args...),
+			WorkDir:       c.WorkDir,
+			EnvVars:       cloneEnvVars(c.EnvVars),
+			UpdateCommand: c.UpdateCommand,
+			CreatedAt:     c.CreatedAt,
+			AutoStart:     c.AutoStart,
 		})
 	}
 	cm.mu.RUnlock()
@@ -233,16 +254,17 @@ func (cm *ConsoleManager) loadFromDisk() error {
 		}
 
 		loaded[id] = &Console{
-			ID:        id,
-			Name:      name,
-			Command:   command,
-			Args:      append([]string(nil), record.Args...),
-			WorkDir:   strings.TrimSpace(record.WorkDir),
-			EnvVars:   cloneEnvVars(record.EnvVars),
-			Status:    "stopped",
-			CreatedAt: createdAt,
-			AutoStart: record.AutoStart,
-			output:    NewRingBuffer(256 * 1024),
+			ID:            id,
+			Name:          name,
+			Command:       command,
+			Args:          append([]string(nil), record.Args...),
+			WorkDir:       strings.TrimSpace(record.WorkDir),
+			EnvVars:       cloneEnvVars(record.EnvVars),
+			UpdateCommand: strings.TrimSpace(record.UpdateCommand),
+			Status:        "stopped",
+			CreatedAt:     createdAt,
+			AutoStart:     record.AutoStart,
+			output:        NewRingBuffer(256 * 1024),
 		}
 	}
 
@@ -268,7 +290,7 @@ func (cm *ConsoleManager) restoreAutoStartConsoles() {
 	}
 }
 
-func (cm *ConsoleManager) Create(name, command string, args []string, workDir string, envVars map[string]string, autoStart bool) (*Console, error) {
+func (cm *ConsoleManager) Create(name, command string, args []string, workDir string, envVars map[string]string, updateCommand string, autoStart bool) (*Console, error) {
 	if workDir != "" {
 		fi, err := os.Stat(workDir)
 		if err != nil {
@@ -280,16 +302,17 @@ func (cm *ConsoleManager) Create(name, command string, args []string, workDir st
 	}
 
 	c := &Console{
-		ID:        uuid.New().String(),
-		Name:      name,
-		Command:   command,
-		Args:      args,
-		WorkDir:   workDir,
-		EnvVars:   cloneEnvVars(envVars),
-		Status:    "stopped",
-		CreatedAt: time.Now(),
-		AutoStart: autoStart,
-		output:    NewRingBuffer(256 * 1024), // 256KB ring buffer
+		ID:            uuid.New().String(),
+		Name:          name,
+		Command:       command,
+		Args:          args,
+		WorkDir:       workDir,
+		EnvVars:       cloneEnvVars(envVars),
+		UpdateCommand: strings.TrimSpace(updateCommand),
+		Status:        "stopped",
+		CreatedAt:     time.Now(),
+		AutoStart:     autoStart,
+		output:        NewRingBuffer(256 * 1024), // 256KB ring buffer
 	}
 
 	cm.mu.Lock()
@@ -309,10 +332,11 @@ func (cm *ConsoleManager) Create(name, command string, args []string, workDir st
 	return c, nil
 }
 
-func (cm *ConsoleManager) Update(id, name, command string, args []string, workDir string) (*Console, error) {
+func (cm *ConsoleManager) Update(id, name, command string, args []string, workDir string, updateCommand string) (*Console, error) {
 	command = strings.TrimSpace(command)
 	name = strings.TrimSpace(name)
 	workDir = strings.TrimSpace(workDir)
+	updateCommand = strings.TrimSpace(updateCommand)
 	if command == "" {
 		return nil, fmt.Errorf("command is required")
 	}
@@ -334,15 +358,20 @@ func (cm *ConsoleManager) Update(id, name, command string, args []string, workDi
 		return nil, fmt.Errorf("console not found: %s", id)
 	}
 
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
 	c.mu.Lock()
 	prevName := c.Name
 	prevCommand := c.Command
 	prevArgs := append([]string(nil), c.Args...)
 	prevWorkDir := c.WorkDir
+	prevUpdateCommand := c.UpdateCommand
 	c.Name = name
 	c.Command = command
 	c.Args = append([]string(nil), args...)
 	c.WorkDir = workDir
+	c.UpdateCommand = updateCommand
 	c.mu.Unlock()
 
 	if err := cm.saveToDisk(); err != nil {
@@ -351,6 +380,7 @@ func (cm *ConsoleManager) Update(id, name, command string, args []string, workDi
 		c.Command = prevCommand
 		c.Args = prevArgs
 		c.WorkDir = prevWorkDir
+		c.UpdateCommand = prevUpdateCommand
 		c.mu.Unlock()
 		return nil, fmt.Errorf("failed to persist console update: %w", err)
 	}
@@ -438,58 +468,98 @@ func (cm *ConsoleManager) Start(id string) error {
 		return fmt.Errorf("console not found: %s", id)
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
 
+	return cm.startConsole(c)
+}
+
+func (cm *ConsoleManager) startConsole(c *Console) error {
+	c.mu.Lock()
 	if c.Status == "running" {
+		c.mu.Unlock()
 		return fmt.Errorf("console already running")
 	}
-
-	c.cmd = exec.Command(c.Command, c.Args...)
-	if c.WorkDir != "" {
-		c.cmd.Dir = c.WorkDir
+	if c.Status == "updating" {
+		c.mu.Unlock()
+		return fmt.Errorf("console is updating")
 	}
-	c.cmd.Env = buildCommandEnv(c.EnvVars)
 
-	ptmx, err := pty.Start(c.cmd)
+	cmd := exec.Command(c.Command, c.Args...)
+	if c.WorkDir != "" {
+		cmd.Dir = c.WorkDir
+	}
+	cmd.Env = buildCommandEnv(c.EnvVars)
+	c.mu.Unlock()
+
+	ptmx, err := pty.Start(cmd)
 	if err != nil {
 		return fmt.Errorf("failed to start pty: %w", err)
 	}
+
+	done := make(chan struct{})
+
+	c.mu.Lock()
+	c.cmd = cmd
 	c.ptmx = ptmx
+	c.waitDone = done
+	c.stopRequested = false
 	c.Status = "running"
 	c.ExitCode = 0
+	c.mu.Unlock()
 
-	// Background goroutine: read PTY output, store in ring buffer and broadcast
-	go func() {
-		buf := make([]byte, 4096)
-		for {
-			n, err := ptmx.Read(buf)
-			if n > 0 {
-				data := make([]byte, n)
-				copy(data, buf[:n])
-				c.output.Write(data)
-				c.broadcast(data)
-			}
-			if err != nil {
-				break
-			}
-		}
-		c.mu.Lock()
-		if c.cmd.ProcessState != nil {
-			c.ExitCode = c.cmd.ProcessState.ExitCode()
-		}
-		c.Status = "exited"
-		c.mu.Unlock()
-		// Notify all subscribers that stream ended
-		c.broadcast(nil)
-	}()
-
-	// Wait for process to finish in background
-	go func() {
-		_ = c.cmd.Wait()
-	}()
+	go cm.streamConsoleOutput(c, ptmx)
+	go cm.waitForConsoleExit(c, cmd, ptmx, done)
 
 	return nil
+}
+
+func (cm *ConsoleManager) streamConsoleOutput(c *Console, ptmx *os.File) {
+	buf := make([]byte, 4096)
+	for {
+		n, err := ptmx.Read(buf)
+		if n > 0 {
+			c.writeOutput(buf[:n])
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (cm *ConsoleManager) waitForConsoleExit(c *Console, cmd *exec.Cmd, ptmx *os.File, done chan struct{}) {
+	err := cmd.Wait()
+
+	c.mu.Lock()
+	if cmd.ProcessState != nil {
+		c.ExitCode = cmd.ProcessState.ExitCode()
+	}
+	stopRequested := c.stopRequested
+	c.stopRequested = false
+	if c.cmd == cmd {
+		c.cmd = nil
+	}
+	if c.ptmx == ptmx {
+		c.ptmx = nil
+	}
+	c.waitDone = nil
+	if stopRequested {
+		c.Status = "stopped"
+	} else if c.Status != "updating" {
+		c.Status = "exited"
+	}
+	c.mu.Unlock()
+
+	if ptmx != nil {
+		_ = ptmx.Close()
+	}
+
+	if err != nil && !stopRequested {
+		log.Printf("Console %s exited with error: %v", c.ID, err)
+	}
+
+	c.broadcast(nil)
+	close(done)
 }
 
 func (cm *ConsoleManager) Stop(id string) error {
@@ -498,29 +568,104 @@ func (cm *ConsoleManager) Stop(id string) error {
 		return fmt.Errorf("console not found: %s", id)
 	}
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
 
+	return cm.stopConsole(c)
+}
+
+func (cm *ConsoleManager) stopConsole(c *Console) error {
+	c.mu.Lock()
 	if c.Status != "running" {
+		c.mu.Unlock()
 		return fmt.Errorf("console not running")
 	}
+	proc := c.cmd.Process
+	done := c.waitDone
+	c.stopRequested = true
+	c.mu.Unlock()
 
-	if c.cmd != nil && c.cmd.Process != nil {
-		_ = c.cmd.Process.Signal(syscall.SIGTERM)
-		go func() {
-			time.Sleep(5 * time.Second)
-			c.mu.Lock()
-			if c.Status == "stopped" && c.cmd != nil && c.cmd.Process != nil {
-				_ = c.cmd.Process.Kill()
-			}
-			c.mu.Unlock()
-		}()
+	if proc != nil {
+		if err := proc.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return fmt.Errorf("failed to terminate console: %w", err)
+		}
 	}
+
+	if done == nil {
+		return nil
+	}
+
+	select {
+	case <-done:
+		return nil
+	case <-time.After(5 * time.Second):
+	}
+
+	if proc != nil {
+		if err := proc.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			return fmt.Errorf("failed to kill console after graceful timeout: %w", err)
+		}
+	}
+
+	select {
+	case <-done:
+		return nil
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("timed out waiting for console to stop")
+	}
+}
+
+func (cm *ConsoleManager) ExecuteUpdate(id string) error {
+	c, ok := cm.Get(id)
+	if !ok {
+		return fmt.Errorf("console not found: %s", id)
+	}
+
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
+	c.mu.Lock()
+	updateCommand := strings.TrimSpace(c.UpdateCommand)
+	status := c.Status
+	c.mu.Unlock()
+
+	if updateCommand == "" {
+		return fmt.Errorf("update command is not configured")
+	}
+
+	if status == "running" {
+		c.writeSystemMessage("正在优雅停止实例，准备执行更新。")
+		if err := cm.stopConsole(c); err != nil {
+			return err
+		}
+	}
+
+	c.mu.Lock()
+	c.Status = "updating"
+	c.ExitCode = 0
+	c.mu.Unlock()
+
+	c.writeSystemMessage("执行更新指令: %s", updateCommand)
+
+	if err := runShellCommand(updateCommand, c.WorkDir, c.EnvVars, newConsoleOutputWriter(c)); err != nil {
+		c.mu.Lock()
+		c.Status = "stopped"
+		c.mu.Unlock()
+		c.writeSystemMessage("更新失败: %v", err)
+		return fmt.Errorf("update command failed: %w", err)
+	}
+
+	c.writeSystemMessage("更新完成，正在重启实例。")
+
+	c.mu.Lock()
 	c.Status = "stopped"
-	if c.ptmx != nil {
-		c.ptmx.Close()
-		c.ptmx = nil
+	c.mu.Unlock()
+
+	if err := cm.startConsole(c); err != nil {
+		c.writeSystemMessage("重启失败: %v", err)
+		return fmt.Errorf("restart failed: %w", err)
 	}
+
 	return nil
 }
 
@@ -546,7 +691,23 @@ func (cm *ConsoleManager) StopAll() {
 }
 
 func (cm *ConsoleManager) Delete(id string) error {
-	_ = cm.Stop(id)
+	c, ok := cm.Get(id)
+	if !ok {
+		return fmt.Errorf("console not found: %s", id)
+	}
+
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
+	c.mu.Lock()
+	running := c.Status == "running"
+	c.mu.Unlock()
+	if running {
+		if err := cm.stopConsole(c); err != nil {
+			return err
+		}
+	}
+
 	cm.mu.Lock()
 	delete(cm.consoles, id)
 	cm.mu.Unlock()
@@ -594,19 +755,45 @@ var upgrader = websocket.Upgrader{
 }
 
 type CreateRequest struct {
-	Name      string   `json:"name"`
-	Command   string   `json:"command"`
-	Args      []string `json:"args"`
-	WorkDir   string   `json:"workDir"`
-	EnvVars   map[string]string `json:"envVars"`
-	AutoStart bool     `json:"autoStart"`
+	Name          string            `json:"name"`
+	Command       string            `json:"command"`
+	Args          []string          `json:"args"`
+	WorkDir       string            `json:"workDir"`
+	EnvVars       map[string]string `json:"envVars"`
+	UpdateCommand string            `json:"updateCommand"`
+	AutoStart     bool              `json:"autoStart"`
 }
 
 type UpdateRequest struct {
-	Name    string   `json:"name"`
-	Command string   `json:"command"`
-	Args    []string `json:"args"`
-	WorkDir string   `json:"workDir"`
+	Name          string   `json:"name"`
+	Command       string   `json:"command"`
+	Args          []string `json:"args"`
+	WorkDir       string   `json:"workDir"`
+	UpdateCommand string   `json:"updateCommand"`
+}
+
+type consoleOutputWriter struct {
+	console *Console
+}
+
+func newConsoleOutputWriter(c *Console) io.Writer {
+	return &consoleOutputWriter{console: c}
+}
+
+func (w *consoleOutputWriter) Write(p []byte) (int, error) {
+	w.console.writeOutput(p)
+	return len(p), nil
+}
+
+func runShellCommand(commandLine, workDir string, envVars map[string]string, output io.Writer) error {
+	cmd := exec.Command("sh", "-lc", commandLine)
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
+	cmd.Env = buildCommandEnv(envVars)
+	cmd.Stdout = output
+	cmd.Stderr = output
+	return cmd.Run()
 }
 
 type ResizeMsg struct {
@@ -778,7 +965,7 @@ func main() {
 					req.WorkDir = abs
 				}
 			}
-			c, err := mgr.Create(req.Name, req.Command, req.Args, req.WorkDir, req.EnvVars, req.AutoStart)
+			c, err := mgr.Create(req.Name, req.Command, req.Args, req.WorkDir, req.EnvVars, req.UpdateCommand, req.AutoStart)
 			if err != nil {
 				jsonResp(w, 500, APIResponse{Error: err.Error()})
 				return
@@ -838,7 +1025,7 @@ func main() {
 					req.WorkDir = abs
 				}
 			}
-			c, err := mgr.Update(id, req.Name, req.Command, req.Args, req.WorkDir)
+			c, err := mgr.Update(id, req.Name, req.Command, req.Args, req.WorkDir, req.UpdateCommand)
 			if err != nil {
 				jsonResp(w, 500, APIResponse{Error: err.Error()})
 				return
@@ -854,6 +1041,13 @@ func main() {
 
 		case action == "stop" && r.Method == http.MethodPost:
 			if err := mgr.Stop(id); err != nil {
+				jsonResp(w, 500, APIResponse{Error: err.Error()})
+				return
+			}
+			jsonResp(w, 200, APIResponse{Success: true})
+
+		case action == "update" && r.Method == http.MethodPost:
+			if err := mgr.ExecuteUpdate(id); err != nil {
 				jsonResp(w, 500, APIResponse{Error: err.Error()})
 				return
 			}
