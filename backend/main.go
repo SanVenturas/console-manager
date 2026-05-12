@@ -669,6 +669,32 @@ func (cm *ConsoleManager) ExecuteUpdate(id string) error {
 	return nil
 }
 
+func (cm *ConsoleManager) Restart(id string) error {
+	c, ok := cm.Get(id)
+	if !ok {
+		return fmt.Errorf("console not found: %s", id)
+	}
+
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
+	c.mu.Lock()
+	status := c.Status
+	c.mu.Unlock()
+
+	if status == "updating" {
+		return fmt.Errorf("console is updating")
+	}
+
+	if status == "running" {
+		if err := cm.stopConsole(c); err != nil {
+			return err
+		}
+	}
+
+	return cm.startConsole(c)
+}
+
 func (cm *ConsoleManager) StopAll() {
 	consoles := cm.List()
 	sort.Slice(consoles, func(i, j int) bool {
@@ -1041,6 +1067,13 @@ func main() {
 
 		case action == "stop" && r.Method == http.MethodPost:
 			if err := mgr.Stop(id); err != nil {
+				jsonResp(w, 500, APIResponse{Error: err.Error()})
+				return
+			}
+			jsonResp(w, 200, APIResponse{Success: true})
+
+		case action == "restart" && r.Method == http.MethodPost:
+			if err := mgr.Restart(id); err != nil {
 				jsonResp(w, 500, APIResponse{Error: err.Error()})
 				return
 			}
